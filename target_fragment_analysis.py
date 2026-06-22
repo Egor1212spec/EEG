@@ -1,21 +1,6 @@
-"""
-Анализ ЦЕЛЕВОГО (самого продолжительного) устойчивого фрагмента ЭЭГ.
 
-Что делает (по заданию ментора):
-  1. Находит устойчивые частотные фрагменты (логика из stable_freq.py) и
-     выбирает ЦЕЛЕВОЙ — самый продолжительный фрагмент.
-  2. Возвращается к исходной записи ЭЭГ (диапазон 1-30 Гц) на этом фрагменте.
-  3. Проводит спектральный анализ ПО КАЖДОМУ отведению (метод Уэлча).
-  4. Для полосы альфа-ритма (8-13 Гц) считает по каждому каналу:
-       - модальную (доминирующую) частоту;
-       - частотный разброс (СКО частоты в альфе) и спектральную ширину;
-       - набор коэффициентов (альфа-индекс, отношения мощностей, энтропия,
-         пиковость, добротность).
-  5. Рисует карты (топокарты) распределения этих величин по отведениям.
 
-Результат: CSV с поканальными коэффициентами + PNG (топокарты, спектры).
-"""
-
+import os
 import numpy as np
 import pandas as pd
 import mne
@@ -26,50 +11,67 @@ from scipy.signal import spectrogram, welch
 
 mne.set_log_level("ERROR")
 
-# ============================ ПАРАМЕТРЫ ============================
 F_NAME        = "NP042309_CE.fif"
-DETECT_CH     = ["O1", "O2", "P3", "P4"]  # каналы для поиска устойчивой частоты
-BAND          = (6.0, 15.0)               # рабочая полоса детекции (по В.Б.)
-MIN_DURATION  = 1.0      # минимальная длительность устойчивого фрагмента, с
-FREQ_TOL      = 0.5      # коридор устойчивости частоты, +/- Гц
-WIN_SEC       = 2.0      # окно спектрограммы, с
-STEP_SEC      = 0.25     # шаг скользящего окна, с
+FIG_DIR       = "figures"   
+CSV_DIR       = "results"   
 
-ANALYSIS_BAND = (1.0, 30.0)   # диапазон спектрального анализа целевого фрагмента
-ALPHA_BAND    = (8.0, 13.0)   # полоса альфа-ритма
-PSD_NFFT      = 2048          # длина FFT (с zero-padding -> тонкая сетка по частоте)
-MAIN_CH       = ["O1", "O2", "P3", "P4", "Pz"]  # «основные» отведения для спектров
+
+DETECT_CH     = ["O1", "O2", "P3", "P4"]
+
+BAND          = (6.0, 15.0)
+
+# Условия, по которым участок считается "устойчивым":
+MIN_DURATION  = 1.0      
+FREQ_TOL      = 0.5      # +/- Гц
+WIN_SEC       = 2.0      # ширина окна, в котором меряем частоту, с
+STEP_SEC      = 0.25     # на сколько сдвигаем окно на каждом шаге, с
+
+# Параметры спектрального анализа:
+ANALYSIS_BAND = (1.0, 30.0)   # полоса для спектра
+ALPHA_BAND    = (8.0, 13.0)   # льфа-ритмом
+PSD_NFFT      = 2048          # длина FFT
+
+MAIN_CH       = ["O1", "O2", "P3", "P4", "Pz"]  
+
 
 BANDS = {"delta": (0.5, 4), "theta": (4, 8), "alpha": (8, 13), "beta": (13, 30)}
-# ==================================================================
 
 
-# ----------------- детекция устойчивых фрагментов (из stable_freq.py) -----------------
+
+
 def dominant_freq_track(sig, sfreq):
+    
     nperseg = int(WIN_SEC * sfreq)
     noverlap = nperseg - int(STEP_SEC * sfreq)
     f, t, Sxx = spectrogram(sig, fs=sfreq, nperseg=nperseg,
                             noverlap=noverlap, scaling="density")
+    
     bmask = (f >= BAND[0]) & (f <= BAND[1])
     fb, Sb = f[bmask], Sxx[bmask, :]
     dom_idx = np.argmax(Sb, axis=0)
+
     return t, fb[dom_idx], Sb[dom_idx, np.arange(Sb.shape[1])]
 
 
 def find_stable_runs(t, dom_freq, gate, min_dur, tol):
+
+
     runs = []
     n = len(dom_freq)
     i = 0
     while i < n:
+        
         if not gate[i]:
             i += 1
             continue
         j = i
         acc = [dom_freq[i]]
+        
         while j + 1 < n and gate[j + 1] and abs(dom_freq[j + 1] - np.mean(acc)) <= tol:
             j += 1
             acc.append(dom_freq[j])
         dur = t[j] - t[i]
+        
         if dur >= min_dur:
             runs.append({"start": float(t[i]), "end": float(t[j]),
                          "freq": float(np.mean(acc))})
@@ -78,71 +80,77 @@ def find_stable_runs(t, dom_freq, gate, min_dur, tol):
 
 
 def detect_target_fragment(raw, sfreq):
-    """Возвращает самый продолжительный устойчивый фрагмент {start,end,freq,duration}."""
     avail = [ch for ch in DETECT_CH if ch in raw.ch_names]
     if not avail:
         raise SystemExit(f"Нет ни одного из каналов {DETECT_CH}")
+    
     band_raw = raw.copy().filter(*BAND)
     sig = band_raw.get_data(picks=avail).mean(axis=0)
     t, dom_freq, dom_power = dominant_freq_track(sig, sfreq)
+    
     gate = dom_power > np.median(dom_power)
     runs = find_stable_runs(t, dom_freq, gate, MIN_DURATION, FREQ_TOL)
     if not runs:
         raise SystemExit("Устойчивых фрагментов не найдено — смягчите параметры.")
+    
     for k, r in enumerate(runs, 1):
         r["index"] = k
         r["duration"] = r["end"] - r["start"]
+    
     target = max(runs, key=lambda r: r["duration"])
     return target, runs, avail
 
 
-# ----------------- поканальные спектральные коэффициенты -----------------
+
 def channel_psd(sig, sfreq):
-    """Welch PSD с zero-padding для тонкого разрешения по частоте."""
+    
     nperseg = min(len(sig), int(2 * sfreq))
     nfft = max(PSD_NFFT, nperseg)
     f, p = welch(sig, fs=sfreq, nperseg=nperseg, nfft=nfft, scaling="density")
+    
     m = (f >= ANALYSIS_BAND[0]) & (f <= ANALYSIS_BAND[1])
+    
     return f[m], p[m]
 
 
 def band_power(f, p, lo, hi):
+    # Мощность в заданной полосе — это площадь под кривой спектра на этом участке.
     m = (f >= lo) & (f <= hi)
     return float(np.trapezoid(p[m], f[m])) if m.any() else 0.0
 
 
 def alpha_coefficients(f, p):
-    """Все коэффициенты для одного канала по спектру (f,p) в диапазоне 1-30 Гц."""
+    
     am = (f >= ALPHA_BAND[0]) & (f <= ALPHA_BAND[1])
     fa, pa = f[am], p[am]
 
-    # --- частотные характеристики альфы ---
-    modal_freq = float(fa[np.argmax(pa)])              # мода (доминирующая частота)
+    
+    modal_freq = float(fa[np.argmax(pa)])              
     psum = pa.sum()
-    centroid = float(np.sum(fa * pa) / psum)           # спектральный центроид (ср. частота)
-    spread = float(np.sqrt(np.sum((fa - centroid) ** 2 * pa) / psum))  # частотный разброс, СКО
+    centroid = float(np.sum(fa * pa) / psum)           
+    spread = float(np.sqrt(np.sum((fa - centroid) ** 2 * pa) / psum))  
 
-    # --- мощности по диапазонам ---
+  
     p_total = band_power(f, p, ANALYSIS_BAND[0], ANALYSIS_BAND[1])
     p_alpha = band_power(f, p, *ALPHA_BAND)
     p_theta = band_power(f, p, *BANDS["theta"])
     p_beta = band_power(f, p, *BANDS["beta"])
     p_delta = band_power(f, p, *BANDS["delta"])
 
-    # --- коэффициенты ---
-    alpha_index = 100.0 * p_alpha / p_total if p_total > 0 else 0.0     # альфа-индекс, %
-    alpha_theta = p_alpha / p_theta if p_theta > 0 else np.nan          # альфа/тета
-    alpha_beta = p_alpha / p_beta if p_beta > 0 else np.nan             # альфа/бета
+    
+    alpha_index = 100.0 * p_alpha / p_total if p_total > 0 else 0.0     
+    alpha_theta = p_alpha / p_theta if p_theta > 0 else np.nan          
+    alpha_beta = p_alpha / p_beta if p_beta > 0 else np.nan             
     peak_power = float(pa.max())
-    peakedness = peak_power / pa.mean() if pa.mean() > 0 else np.nan    # пиковость (пик/средн.)
+    peakedness = peak_power / pa.mean() if pa.mean() > 0 else np.nan   
 
-    # ширина пика на полувысоте (FWHM) -> добротность Q
+    
     half = peak_power / 2.0
     above = fa[pa >= half]
     fwhm = float(above.max() - above.min()) if above.size >= 2 else 0.0
-    q_factor = modal_freq / fwhm if fwhm > 0 else np.nan               # добротность ритма
+    q_factor = modal_freq / fwhm if fwhm > 0 else np.nan               # острота (добротность) пика
 
-    # спектральная энтропия в альфе (мера «чистоты»: ниже -> регулярнее ритм)
+    
     pp = pa / psum
     pp = pp[pp > 0]
     entropy = float(-np.sum(pp * np.log(pp)) / np.log(len(pp))) if len(pp) > 1 else 0.0
@@ -167,7 +175,6 @@ def alpha_coefficients(f, p):
 
 # ----------------- визуализация -----------------
 def plot_topomaps(values_by_metric, info, target, fname):
-    """Сетка топокарт: распределение каждого коэффициента по отведениям."""
     metrics = list(values_by_metric.keys())
     ncol = 3
     nrow = int(np.ceil(len(metrics) / ncol))
@@ -196,7 +203,6 @@ def plot_topomaps(values_by_metric, info, target, fname):
 
 
 def plot_spectra(psd_by_ch, main_ch, target, fname):
-    """Спектры основных отведений на целевом фрагменте с выделенной альфой."""
     fig, ax = plt.subplots(figsize=(10, 5.5))
     for ch in main_ch:
         if ch not in psd_by_ch:
@@ -217,21 +223,23 @@ def plot_spectra(psd_by_ch, main_ch, target, fname):
 
 
 def main():
-    # ---------- Загрузка и предобработка ----------
+    os.makedirs(FIG_DIR, exist_ok=True)
+    os.makedirs(CSV_DIR, exist_ok=True)
+
     raw = mne.io.read_raw_fif(F_NAME, preload=True)
     raw.filter(0.5, 30.0)
     raw.set_eeg_reference("average")
-    sfreq = raw.info["sfreq"]
+    sfreq = raw.info["sfreq"] # частота дискритизации 
 
-    # ---------- Целевой (самый продолжительный) фрагмент ----------
+    
     target, runs, avail = detect_target_fragment(raw, sfreq)
 
-    # ---------- Спектральный анализ целевого фрагмента по всем каналам ----------
+    
     picks_eeg = mne.pick_types(raw.info, eeg=True)
     eeg_names = [raw.ch_names[i] for i in picks_eeg]
     frag = raw.copy().crop(tmin=target["start"], tmax=target["end"])
     data = frag.get_data(picks=picks_eeg)
-
+    
     rows = []
     psd_by_ch = {}
     for k, ch in enumerate(eeg_names):
@@ -241,7 +249,7 @@ def main():
         rows.append({"channel": ch, **coef})
     table = pd.DataFrame(rows)
 
-    # ---------- Топокарты выбранных метрик ----------
+    
     topo_metrics = ["modal_freq_Hz", "centroid_Hz", "freq_spread_Hz",
                     "alpha_index_pct", "alpha_power_uV2", "peakedness",
                     "q_factor", "spectral_entropy", "alpha_theta_ratio"]
@@ -249,20 +257,25 @@ def main():
     values_by_metric = {}
     for m in topo_metrics:
         v = table[m].to_numpy(dtype=float)
-        if np.isnan(v).any():                       # топокарта не любит NaN
+        
+        if np.isnan(v).any():
             v = np.nan_to_num(v, nan=np.nanmean(v) if np.isfinite(np.nanmean(v)) else 0.0)
         values_by_metric[m] = v
+    
+    topo_path = os.path.join(FIG_DIR, "target_topomaps.png")
     try:
-        plot_topomaps(values_by_metric, info, target, "target_topomaps.png")
+        plot_topomaps(values_by_metric, info, target, topo_path)
         topo_ok = True
     except Exception as ex:
         topo_ok = False
         print(f"[!] Топокарты недоступны ({ex}) — пропущено.")
 
+    
     main_avail = [ch for ch in MAIN_CH if ch in psd_by_ch]
-    plot_spectra(psd_by_ch, main_avail, target, "target_spectra.png")
+    spectra_path = os.path.join(FIG_DIR, "target_spectra.png")
+    plot_spectra(psd_by_ch, main_avail, target, spectra_path)
 
-    # ---------- Сводка ----------
+    
     print("=" * 70)
     print("ЦЕЛЕВОЙ ФРАГМЕНТ: спектральный анализ альфа-ритма по отведениям")
     print("=" * 70)
@@ -276,7 +289,7 @@ def main():
     print(f"Каналов EEG:          {len(eeg_names)}")
     print()
 
-    # сводные показатели по основным отведениям
+    
     main_tbl = table[table["channel"].isin(main_avail)] if main_avail else table
     print("Коэффициенты по основным отведениям:")
     cols = ["channel", "modal_freq_Hz", "freq_spread_Hz", "alpha_index_pct",
@@ -292,12 +305,14 @@ def main():
     print(f"  макс. альфа-мощность в отведении: {top}")
     print()
 
-    table.to_csv("target_coefficients.csv", index=False, encoding="utf-8")
+    
+    csv_path = os.path.join(CSV_DIR, "target_coefficients.csv")
+    table.to_csv(csv_path, index=False, encoding="utf-8")
     print("Сохранено:")
-    print("  target_coefficients.csv  — коэффициенты по всем отведениям")
+    print(f"  {csv_path}  — коэффициенты по всем отведениям")
     if topo_ok:
-        print("  target_topomaps.png      — карты распределения по отведениям")
-    print("  target_spectra.png       — спектры основных отведений")
+        print(f"  {topo_path}      — карты распределения по отведениям")
+    print(f"  {spectra_path}       — спектры основных отведений")
 
 
 if __name__ == "__main__":
