@@ -1,0 +1,5 @@
+/home/maths/vscode/EEG/cpp_gui/build/CMakeFiles/eeg_gui_cpp.dir
+/home/maths/vscode/EEG/cpp_gui/build/CMakeFiles/edit_cache.dir
+/home/maths/vscode/EEG/cpp_gui/build/CMakeFiles/rebuild_cache.dir
+/home/maths/vscode/EEG/cpp_gui/build/CMakeFiles/eeg_gui_cpp_autogen_timestamp_deps.dir
+/home/maths/vscode/EEG/cpp_gui/build/CMakeFiles/eeg_gui_cpp_autogen.dir
