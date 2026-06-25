@@ -7,11 +7,41 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QCoreApplication>
+#include <QDir>
+#include <QFile>
 #include <algorithm>
 
 static QString envOr(const char *name, const QString &def) {
     QByteArray v = qgetenv(name);
     return v.isEmpty() ? def : QString::fromLocal8Bit(v);
+}
+
+// Где лежит проект (рядом должен быть worker.py):
+//   1) EEG_PROJECT_DIR;  2) поиск worker.py вверх от папки с программой;
+//   3) захардкоженный путь;  4) текущая папка.
+static QString resolveProjectDir() {
+    QByteArray env = qgetenv("EEG_PROJECT_DIR");
+    if (!env.isEmpty()) return QString::fromLocal8Bit(env);
+    QDir d(QCoreApplication::applicationDirPath());
+    for (int i = 0; i < 6; ++i) {
+        if (QFile::exists(d.filePath("worker.py"))) return d.absolutePath();
+        if (!d.cdUp()) break;
+    }
+    const QString hard = "/home/maths/vscode/EEG";
+    if (QFile::exists(hard + "/worker.py")) return hard;
+    return QDir::currentPath();
+}
+
+// Какой Python запускать:
+//   1) EEG_PYTHON;  2) захардкоженный путь, если он существует;
+//   3) "python3" из PATH (нужно заранее `conda activate eeg`).
+static QString resolvePython() {
+    QByteArray env = qgetenv("EEG_PYTHON");
+    if (!env.isEmpty()) return QString::fromLocal8Bit(env);
+    const QString hard = "/home/maths/miniconda3/envs/eeg/bin/python";
+    if (QFile::exists(hard)) return hard;
+    return "python3";
 }
 
 // Английский ключ коэффициента -> русское название (для таблицы и списка).
@@ -49,9 +79,10 @@ static void fitColumns(QTableWidget *t, int pad = 18) {
 }
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
-    // Пути по умолчанию (под эту машину); переопределяются env-переменными.
-    python_  = envOr("EEG_PYTHON", "/home/maths/miniconda3/envs/eeg/bin/python");
-    projDir_ = envOr("EEG_PROJECT_DIR", "/home/maths/vscode/EEG");
+    // Пути определяются автоматически (env → автопоиск → запасной вариант),
+    // поэтому программа переносима между машинами.
+    python_  = resolvePython();
+    projDir_ = resolveProjectDir();
     worker_  = projDir_ + "/worker.py";
     cacheDir_ = projDir_ + "/.gui_cache";
 
@@ -224,13 +255,28 @@ void MainWindow::buildUi() {
 // --------------------------------------------------------------- worker
 bool MainWindow::startServer() {
     if (proc_ && proc_->state() == QProcess::Running) return true;
+
+    if (!QFile::exists(worker_)) {
+        showError("Не найден worker.py:\n" + worker_ +
+                  "\n\nУкажите папку проекта переменной окружения EEG_PROJECT_DIR "
+                  "(там должны лежать worker.py и target_fragment_analysis.py).");
+        return false;
+    }
+
     delete proc_;
     proc_ = new QProcess(this);
     proc_->setWorkingDirectory(projDir_);
     // -u — небуферизованный вывод, чтобы "DONE" приходил сразу
     proc_->start(python_, {"-u", worker_, "serve"});
     if (!proc_->waitForStarted(8000)) {
-        showError("Не удалось запустить Python-воркер:\n" + python_);
+        showError(
+            "Не удалось запустить Python-воркер:\n" + python_ +
+            "\n\nЧто проверить:\n"
+            "• это интерпретатор Python с установленными mne, scipy, pandas, "
+            "matplotlib;\n"
+            "• либо задайте путь к нему: переменная EEG_PYTHON=/путь/к/python;\n"
+            "• либо перед запуском выполните: conda activate eeg\n"
+            "  (тогда подойдёт python3 из PATH).");
         return false;
     }
     return true;

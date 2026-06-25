@@ -849,4 +849,6 @@ CMakeFiles/eeg_gui_cpp.dir/mainwindow.cpp.o: \
  /usr/include/qt6/QtWidgets/qwidgetaction.h \
  /usr/include/qt6/QtWidgets/qwizard.h /usr/include/qt6/QtCore/QProcess \
  /usr/include/qt6/QtCore/QJsonDocument \
- /usr/include/qt6/QtCore/QJsonObject /usr/include/qt6/QtCore/QJsonArray
+ /usr/include/qt6/QtCore/QJsonObject /usr/include/qt6/QtCore/QJsonArray \
+ /usr/include/qt6/QtCore/QCoreApplication /usr/include/qt6/QtCore/QDir \
+ /usr/include/qt6/QtCore/QFile
